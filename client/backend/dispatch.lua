@@ -162,7 +162,8 @@ if Config.UseWolfknightRadar then
             local playerData = ps.getPlayerData()
             local charinfo = playerData and playerData.charinfo or {}
             local job = playerData and playerData.job or {}
-            local gradeName = job.grade and job.grade.name or ''
+            local grade = job.grade
+            local gradeName = (type(grade) == 'table' and grade.name) or job.grade_name or ''
 
             exports['ps-dispatch']:CustomAlert({
                 coords = { x = currentPos.x, y = currentPos.y, z = currentPos.z },

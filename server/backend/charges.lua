@@ -32,7 +32,7 @@ end)
 
 -- Process a fine - deduct money from citizen's bank account
 -- Ported from ps-mdt v1 (mdt:server:removeMoney)
-local fineCooldowns = {}
+local fineAntiSpam = false
 ps.registerCallback(resourceName .. ':server:processFine', function(source, payload)
     local src = source
     if not CheckAuth(src) then return { success = false, message = 'Unauthorized' } end
@@ -42,37 +42,40 @@ ps.registerCallback(resourceName .. ':server:processFine', function(source, payl
     local fine = tonumber(payload.fine)
     local reportId = payload.reportId
 
-    if not citizenId or not fine or fine ~= fine or fine <= 0 then
-        return { success = false, message = 'Missing citizen ID or invalid fine amount' }
-    end
-
-    fine = math.floor(fine)
-
     local jfConfig = GetJailFinesConfig and GetJailFinesConfig() or {}
     local maxFine = jfConfig.maxFineAmount or (Config and Config.Fines and Config.Fines.MaxAmount) or 100000
+    if not citizenId or not fine or fine <= 0 then
+        return { success = false, message = 'Missing citizen ID or invalid fine amount' }
+    end
     if fine > maxFine then
         return { success = false, message = 'Fine amount exceeds maximum of $' .. maxFine }
     end
 
-    local now = os.time() * 1000
-    local cooldownMs = (Config and Config.Fines and Config.Fines.CooldownMs) or 30000
-    if fineCooldowns[src] and (now - fineCooldowns[src]) < cooldownMs then
+    if fineAntiSpam then
         return { success = false, message = 'Fine processing on cooldown' }
     end
 
     -- Try to get online player first
     local Player = ps.getPlayerByIdentifier(citizenId)
-    if not Player then
+    -- ESX xPlayer exposes .source; QB/Qbox expose .PlayerData.source.
+    -- getPlayerByIdentifier may return an OFFLINE object (no .source / no .PlayerData),
+    -- so guard .PlayerData before indexing it to avoid an ESX hard-error on nil.source.
+    local targetSrc = Player and (Player.source or (Player.PlayerData and Player.PlayerData.source))
+    if not targetSrc then
         return { success = false, message = 'Player must be online to process fine' }
     end
 
     -- Remove money from bank
-    local removed = ps.removeMoney(Player.source or Player.PlayerData.source, 'bank', fine, 'mdt-fine')
+    local removed = ps.removeMoney(targetSrc, 'bank', fine, 'mdt-fine')
     if removed then
-        ps.notify(Player.source or Player.PlayerData.source, '$' .. fine .. ' fine deducted from your bank account', 'error')
+        ps.notify(targetSrc, '$' .. fine .. ' fine deducted from your bank account', 'error')
 
         -- Anti-spam cooldown
-        fineCooldowns[src] = os.time() * 1000
+        fineAntiSpam = true
+        local cooldown = (Config and Config.Fines and Config.Fines.CooldownMs) or 30000
+        SetTimeout(cooldown, function()
+            fineAntiSpam = false
+        end)
 
         if ps.auditLog then
             local officerName = ps.getPlayerName(src) or 'Unknown Officer'

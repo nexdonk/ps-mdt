@@ -108,7 +108,7 @@ ps.registerCallback(resourceName .. ':server:getCases', function(source, page, f
                mp.callsign AS primary_officer_callsign
         FROM mdt_cases mc
         LEFT JOIN mdt_case_officers mco ON mco.case_id = mc.id AND mco.role = 'primary'
-        LEFT JOIN mdt_profiles mp ON mp.citizenid COLLATE utf8mb4_general_ci = mco.citizenid COLLATE utf8mb4_general_ci
+        LEFT JOIN mdt_profiles mp ON CONVERT(mp.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci = CONVERT(mco.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci
         %s
         ORDER BY mc.updated_at DESC
         LIMIT ? OFFSET ?
@@ -138,7 +138,7 @@ ps.registerCallback(resourceName .. ':server:getCase', function(source, caseId)
         SELECT mco.citizenid, mco.role, mco.assigned_by, mco.assigned_at,
                mp.fullname, mp.callsign, mp.badge_number, mp.rank, mp.department
         FROM mdt_case_officers mco
-        LEFT JOIN mdt_profiles mp ON mp.citizenid COLLATE utf8mb4_general_ci = mco.citizenid COLLATE utf8mb4_general_ci
+        LEFT JOIN mdt_profiles mp ON CONVERT(mp.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci = CONVERT(mco.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci
         WHERE mco.case_id = ?
         ORDER BY mco.assigned_at ASC
     ]], { caseId })
@@ -549,40 +549,21 @@ ps.registerCallback(resourceName .. ':server:removeCaseAttachment', function(sou
     return { success = true }
 end)
 
-ps.registerCallback(resourceName .. ':server:addEvidenceItem', function(source, payload)
+ps.registerCallback(resourceName .. ':server:addEvidenceItem', function(source, caseId, evidence)
     local src = source
     if not CheckAuth(src) then return { success = false, error = 'Unauthorized' } end
 
-    payload = payload or {}
-    local caseId = tonumber(payload.caseId)
-    local reportId = tonumber(payload.reportId)
-    local evidence = payload.evidence or payload
-
-    if not evidence or not evidence.title then
-        return { success = false, error = 'Invalid evidence: title is required' }
-    end
-
-    if caseId then
-        local caseExists = MySQL.single.await('SELECT id FROM mdt_cases WHERE id = ?', { caseId })
-        if not caseExists then
-            caseId = nil
-        end
-    end
-
-    if reportId then
-        local reportExists = MySQL.single.await('SELECT id FROM mdt_reports WHERE id = ?', { reportId })
-        if not reportExists then
-            reportId = nil
-        end
+    caseId = tonumber(caseId)
+    if not caseId or not evidence or not evidence.title then
+        return { success = false, error = 'Invalid evidence' }
     end
 
     local evidenceId = MySQL.insert.await([[
         INSERT INTO mdt_evidence_items
-        (case_id, report_id, title, type, serial, notes, location, stash_id, stored, last_holder, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (case_id, title, type, serial, notes, location, stash_id, stored, last_holder, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ]], {
         caseId,
-        reportId,
         evidence.title,
         evidence.type or 'Evidence',
         evidence.serial or '',
@@ -609,6 +590,8 @@ ps.registerCallback(resourceName .. ':server:addEvidenceItem', function(source, 
 
     return { success = true, id = evidenceId }
 end)
+
+-- addEvidenceImage handler is in evidence.lua (not duplicated here)
 
 ps.registerCallback(resourceName .. ':server:removeEvidenceImage', function(source, imageId)
     local src = source

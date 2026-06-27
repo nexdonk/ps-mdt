@@ -42,9 +42,10 @@ local function getExpiryDate(value)
     return nil
 end
 
--- Exposed as a global so the dashboard aggregate (server/backend/dashboard.lua)
--- can reuse it without a second round-trip.
-function GetActiveWarrantsData(src)
+ps.registerCallback(resourceName .. ':server:getActiveWarrants', function(source)
+    local src = source
+    if not CheckAuth(src) then return {} end
+
     local rows = MySQL.query.await([[
         SELECT
             w.reportid,
@@ -56,7 +57,7 @@ function GetActiveWarrantsData(src)
             JSON_UNQUOTE(JSON_EXTRACT(p.charinfo, '$.firstname')) AS firstname,
             JSON_UNQUOTE(JSON_EXTRACT(p.charinfo, '$.lastname')) AS lastname
         FROM mdt_reports_warrants w
-        LEFT JOIN players p ON p.citizenid COLLATE utf8mb4_general_ci = w.citizenid COLLATE utf8mb4_general_ci
+        LEFT JOIN players p ON CONVERT(p.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci = CONVERT(w.citizenid USING utf8mb4) COLLATE utf8mb4_general_ci
         WHERE w.expirydate >= NOW()
         ORDER BY w.expirydate ASC
     ]])
@@ -79,28 +80,11 @@ function GetActiveWarrantsData(src)
     end
 
     return results
-end
-
--- Push the current active-warrants list to all clients so any open MDT
--- live-updates without a manual refresh. The payload is global (identical for
--- every viewer), so a single broadcast is enough; the client relay gates it to
--- LEO players before handing it to the NUI.
-function BroadcastActiveWarrants()
-    TriggerClientEvent(resourceName .. ':client:updateActiveWarrants', -1, GetActiveWarrantsData())
-end
-
-ps.registerCallback(resourceName .. ':server:getActiveWarrants', function(source)
-    local src = source
-    if not CheckAuth(src) then return {} end
-    return GetActiveWarrantsData(src)
 end)
 
 ps.registerCallback(resourceName .. ':server:issueWarrant', function(source, data)
     local src = source
     if not CheckAuth(src) then return { success = false, error = 'Unauthorized' } end
-    if not CheckPermission(src, 'warrants_issue') then
-        return { success = false, error = 'Insufficient permissions' }
-    end
 
     data = data or {}
     local reportId = tonumber(data.reportId)
@@ -114,13 +98,6 @@ ps.registerCallback(resourceName .. ':server:issueWarrant', function(source, dat
 
     if not reportId or not citizenid then
         return { success = false, error = 'Missing required fields' }
-    end
-
-    -- One warrant per report: refuse if this report already has any active
-    -- (non-expired) warrant, regardless of which subject it targets.
-    local activeForReport = MySQL.single.await('SELECT 1 AS x FROM mdt_reports_warrants WHERE reportid = ? AND expirydate >= NOW() LIMIT 1', { reportId })
-    if activeForReport then
-        return { success = false, error = 'This report already has an active warrant' }
     end
 
     local existing = MySQL.single.await('SELECT reportid FROM mdt_reports_warrants WHERE reportid = ? AND citizenid = ?', { reportId, citizenid })
@@ -140,16 +117,12 @@ ps.registerCallback(resourceName .. ':server:issueWarrant', function(source, dat
         })
     end
 
-    BroadcastActiveWarrants()
     return { success = true }
 end)
 
 ps.registerCallback(resourceName .. ':server:closeWarrant', function(source, data)
     local src = source
     if not CheckAuth(src) then return { success = false, error = 'Unauthorized' } end
-    if not CheckPermission(src, 'warrants_close') then
-        return { success = false, error = 'Insufficient permissions' }
-    end
 
     data = data or {}
     local reportId = tonumber(data.reportId)
@@ -170,7 +143,6 @@ ps.registerCallback(resourceName .. ':server:closeWarrant', function(source, dat
                 citizenid = citizenid
             })
         end
-        BroadcastActiveWarrants()
         return { success = true }
     end
 
