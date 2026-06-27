@@ -76,8 +76,13 @@ end
 local _qbCore
 local function getQBCore()
     if _qbCore then return _qbCore end
-    if exports['qb-core'] then
-        _qbCore = exports['qb-core']:GetCoreObject()
+    -- `if exports['qb-core']` is always truthy (it's a proxy), so calling
+    -- :GetCoreObject() on a non-QB server throws. Gate on GetResourceState and
+    -- pcall instead (mirrors tracking.lua / bodycams.lua). On ESX this returns
+    -- nil so getOfficerInfo/playersInDomain fall through to the ps.* branch.
+    if GetResourceState('qb-core') == 'started' then
+        local ok, core = pcall(function() return exports['qb-core']:GetCoreObject() end)
+        if ok then _qbCore = core end
     end
     return _qbCore
 end

@@ -1,3 +1,4 @@
+
 local function getRadioChannel(playerSource)
     if not playerSource then return 0 end
     local channel = 0
@@ -25,13 +26,14 @@ local function getCertifications(citizenid)
     return {}
 end
 
-local function buildRosterFromQbx(jobList, matchFn, defaultDept)
+local function buildRosterFromQbx()
     local rosterList = {}
     local activeUnits = {}
     local members = {}
+    local policeJobs = (Config and Config.PoliceJobs) or { 'police' }
     local qbx = exports['qbx_core']
 
-    for _, jobName in ipairs(jobList) do
+    for _, jobName in ipairs(policeJobs) do
         local groupMembers = qbx:GetGroupMembers(jobName, 'job') or {}
         for _, member in ipairs(groupMembers) do
             if member.citizenid then
@@ -44,7 +46,7 @@ local function buildRosterFromQbx(jobList, matchFn, defaultDept)
         local data = player.PlayerData or nil
         if data and data.job then
             local job = data.job
-            if matchFn(job.name, job.type) then
+            if IsPoliceJob(job.name, job.type) then
                 members[data.citizenid] = true
             end
         end
@@ -52,7 +54,7 @@ local function buildRosterFromQbx(jobList, matchFn, defaultDept)
 
     for _, row in ipairs(MySQL.query.await('SELECT citizenid, job FROM players', {}) or {}) do
         local job = row.job and json.decode(row.job) or {}
-        if matchFn(job.name, job.type) then
+        if IsPoliceJob(job.name, job.type) then
             members[row.citizenid] = true
         end
     end
@@ -66,7 +68,7 @@ local function buildRosterFromQbx(jobList, matchFn, defaultDept)
             local callsign = data.metadata and data.metadata.callsign or 'N/A'
             local fullname = data.charinfo and (data.charinfo.firstname .. ' ' .. data.charinfo.lastname) or 'Unknown'
             local rank = job.grade and job.grade.name or 'Officer'
-            local department = job.name or defaultDept
+            local department = job.name or 'police'
             local certifications = getCertifications(citizenid)
 
             local onlineSrc = onlinePlayer and (onlinePlayer.PlayerData and onlinePlayer.PlayerData.source or onlinePlayer.source) or nil
@@ -102,51 +104,36 @@ local function buildRosterFromQbx(jobList, matchFn, defaultDept)
     }
 end
 
-local function checkDuty(citizenid, matchFn)
-    matchFn = matchFn or IsPoliceJob
+local function checkDuty(citizenid)
     local player = ps.getPlayerByIdentifier(citizenid)
     if not player then return 'Off Duty' end
 
     local src = player.source or (player.PlayerData and player.PlayerData.source)
     if not src then return 'Off Duty' end
 
-    if matchFn(ps.getJobName(src), ps.getJobType(src)) and ps.getJobDuty(src) then
+    if IsPoliceJob(ps.getJobName(src), ps.getJobType(src)) and ps.getJobDuty(src) then
         return 'On Duty'
     end
     return 'Off Duty'
 end
 
 ps.registerCallback('ps-mdt:server:getRosterList', function(source)
-    -- Scope the roster to the caller's domain: EMS sees EMS, police sees police.
-    local domain = GetMdtDomain(source)
-    local jobList, matchFn, defaultDept, scopeJobType
-    if domain == 'ems' then
-        jobList = (Config and Config.MedicalJobs) or { 'ambulance' }
-        matchFn = IsEmsJob
-        defaultDept = (jobList[1]) or 'ambulance'
-        scopeJobType = Config and Config.MedicalJobType and tostring(Config.MedicalJobType) or nil
-    else
-        jobList = (Config and Config.PoliceJobs) or { 'police' }
-        matchFn = IsPoliceJob
-        defaultDept = 'police'
-        scopeJobType = Config and Config.PoliceJobType and tostring(Config.PoliceJobType) or nil
-    end
-
     if GetResourceState('qbx_core') == 'started' and exports['qbx_core'] then
-        return buildRosterFromQbx(jobList, matchFn, defaultDept)
+        return buildRosterFromQbx()
     end
 
     local rosterList = {}
     local activeUnits = {}
+    local policeJobs = (Config and Config.PoliceJobs) or { 'police' }
     local jobLookup = {}
-    for _, jobName in ipairs(jobList) do
+    for _, jobName in ipairs(policeJobs) do
         jobLookup[tostring(jobName)] = true
     end
-    local jobType = scopeJobType
+    local jobType = Config and Config.PoliceJobType and tostring(Config.PoliceJobType) or nil
 
     local employees = {}
     if GetResourceState('ps-multijob') == 'started' and exports['ps-multijob'] then
-        for _, jobName in ipairs(jobList) do
+        for _, jobName in ipairs(policeJobs) do
             local list = exports['ps-multijob']:getEmployees(jobName) or {}
             for _, employee in pairs(list) do
                 if employee and employee.citizenid then
@@ -162,14 +149,14 @@ ps.registerCallback('ps-mdt:server:getRosterList', function(source)
         local job = citizen.job and json.decode(citizen.job) or {}
         local metadata = citizen.metadata and json.decode(citizen.metadata) or {}
         local jobName = job.name and tostring(job.name) or nil
-        local inDomain = (jobName and jobLookup[jobName]) or (job.type and jobType and tostring(job.type) == jobType)
-        if inDomain then
+        local isPolice = (jobName and jobLookup[jobName]) or (job.type and jobType and tostring(job.type) == jobType)
+        if isPolice then
             local employee = employees[citizenid] or {}
             local callsign = metadata.callsign or 'N/A'
             local firstName = charinfo.firstname or 'N/A'
             local lastName = charinfo.lastname or 'N/A'
-            local rank = job.grade and job.grade.name or employee.grade and ps.getSharedJobGradeData(jobName or defaultDept, employee.grade, 'name') or 'Officer'
-            local status = checkDuty(citizenid, matchFn)
+            local rank = job.grade and job.grade.name or employee.grade and ps.getSharedJobGradeData(jobName or 'police', employee.grade, 'name') or 'Officer'
+            local status = checkDuty(citizenid)
             local onlinePlayer = ps.getPlayerByIdentifier(citizenid)
             local onlineSrc = onlinePlayer and (onlinePlayer.source or (onlinePlayer.PlayerData and onlinePlayer.PlayerData.source)) or nil
             rosterList[#rosterList + 1] = {
@@ -179,7 +166,7 @@ ps.registerCallback('ps-mdt:server:getRosterList', function(source)
                 firstName = firstName,
                 lastName = lastName,
                 rank = rank,
-                department = jobName or employee.job or defaultDept,
+                department = jobName or employee.job or 'police',
                 status = status,
                 certifications = getCertifications(citizenid),
                 badgeNumber = callsign,
@@ -211,15 +198,15 @@ ps.registerCallback('ps-mdt:server:getOfficerTags', function(source)
     local rows
     if jobType and (jobType == 'leo' or jobType == 'ems') then
         rows = MySQL.query.await([[
-            SELECT id, name, color, description FROM mdt_tags
-            WHERE type = 'officer'
+            SELECT id, name, color FROM mdt_tags
+            WHERE type IN ('officer', 'both')
               AND (job_type = ? OR job_type = 'all' OR job_type IS NULL)
             ORDER BY name ASC
         ]], { jobType })
     else
         rows = MySQL.query.await([[
-            SELECT id, name, color, description FROM mdt_tags
-            WHERE type = 'officer'
+            SELECT id, name, color FROM mdt_tags
+            WHERE type IN ('officer', 'both')
             ORDER BY name ASC
         ]])
     end
@@ -384,23 +371,21 @@ ps.registerCallback('ps-mdt:server:updateOfficerCallsign', function(source, payl
         return { success = false, message = 'Missing citizen ID or callsign' }
     end
 
-    -- Use the existing setCallsign callback logic
-    local ok, QBCore = pcall(function() return exports['qb-core']:GetCoreObject() end)
-    if not ok or not QBCore then
-        return { success = false, message = 'Core framework not available' }
-    end
-
-    local Player = QBCore.Functions.GetPlayerByCitizenId(citizenid)
-    if not Player then
-        return { success = false, message = 'Officer must be online to update callsign' }
-    end
-
-    Player.Functions.SetMetaData('callsign', newCallsign)
-
-    local resourceName = GetCurrentResourceName()
-    TriggerClientEvent(resourceName .. ':client:updateCallsign', Player.PlayerData.source, newCallsign)
-
+    -- Persist to the MDT profile first so the callsign is retained even if the
+    -- officer is offline (mirrors framework metadata when they are online).
     MySQL.update.await('UPDATE mdt_profiles SET callsign = ? WHERE citizenid = ?', { newCallsign, citizenid })
+
+    local targetSrc = ps.getSource and ps.getSource(citizenid)
+    if not targetSrc then
+        local player = ps.getPlayerByIdentifier(citizenid)
+        targetSrc = player and (player.source or (player.PlayerData and player.PlayerData.source)) or nil
+    end
+
+    if targetSrc then
+        ps.setMetadata(targetSrc, 'callsign', newCallsign)
+        local resourceName = GetCurrentResourceName()
+        TriggerClientEvent(resourceName .. ':client:updateCallsign', targetSrc, newCallsign)
+    end
 
     if ps.auditLog then
         ps.auditLog(src, 'callsign_changed', 'officers', citizenid, { callsign = newCallsign })

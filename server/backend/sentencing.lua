@@ -1,14 +1,9 @@
 local resourceName = tostring(GetCurrentResourceName())
-local ok, QBCore = pcall(function() return exports['qb-core']:GetCoreObject() end)
-if not ok then QBCore = nil end
 
 -- Send to Jail
 ps.registerCallback(resourceName .. ':server:sendToJail', function(source, payload)
     local src = source
     if not CheckAuth(src) then return { success = false, message = 'Unauthorized' } end
-    if not CheckPermission(src, 'charges_edit') then
-        return { success = false, message = 'Insufficient permissions' }
-    end
 
     payload = payload or {}
     local citizenId = payload.citizenId
@@ -16,11 +11,6 @@ ps.registerCallback(resourceName .. ':server:sendToJail', function(source, paylo
 
     if not citizenId or not sentence or sentence <= 0 then
         return { success = false, message = 'Missing citizen ID or invalid sentence' }
-    end
-
-    local maxSentence = (Config and Config.Fines and Config.Fines.MaxSentence) or 999
-    if sentence > maxSentence then
-        return { success = false, message = 'Sentence exceeds maximum of ' .. maxSentence .. ' months' }
     end
 
     local targetPlayer = ps.getPlayerByIdentifier(citizenId)
@@ -33,22 +23,29 @@ ps.registerCallback(resourceName .. ':server:sendToJail', function(source, paylo
         return { success = false, message = 'Could not resolve player source' }
     end
 
-    local OtherPlayer = QBCore and QBCore.Functions.GetPlayer(targetSource)
-    if not OtherPlayer then
-        return { success = false, message = 'Could not find target player' }
-    end
-
     local currentDate = os.date('*t')
     if currentDate.day == 31 then
         currentDate.day = 30
     end
 
-    OtherPlayer.Functions.SetMetaData('injail', sentence)
-    OtherPlayer.Functions.SetMetaData('criminalrecord', {
+    -- Framework-agnostic metadata write (QBCore/Qbox SetMetaData, ESX setMeta).
+    ps.setMetadata(targetSource, 'injail', sentence)
+    ps.setMetadata(targetSource, 'criminalrecord', {
         ['hasRecord'] = true,
         ['date'] = currentDate
     })
-    TriggerClientEvent('police:client:SendToJail', targetSource, sentence)
+
+    -- Trigger the jail script. Defaults to the QBCore police jail event; ESX
+    -- (or any other jail system) can be wired via Config.Jail (see config.lua).
+    local jailCfg = Config.Jail or {}
+    local jailTime = sentence * (jailCfg.TimeMultiplier or 1)
+    if jailCfg.ServerEvent and jailCfg.ServerEvent ~= '' then
+        TriggerEvent(jailCfg.ServerEvent, targetSource, jailTime)
+    end
+    local clientEvent = jailCfg.ClientEvent or 'police:client:SendToJail'
+    if clientEvent and clientEvent ~= '' then
+        TriggerClientEvent(clientEvent, targetSource, jailTime)
+    end
     ps.notify(src, 'Sent to jail for ' .. sentence .. ' months', 'success')
 
     if ps.auditLog then
@@ -63,22 +60,18 @@ end)
 ps.registerCallback(resourceName .. ':server:giveCitation', function(source, payload)
     local src = source
     if not CheckAuth(src) then return { success = false, message = 'Unauthorized' } end
-    if not CheckPermission(src, 'charges_edit') then
-        return { success = false, message = 'Insufficient permissions' }
-    end
 
     payload = payload or {}
     local citizenId = payload.citizenId
-    local fine = tonumber(payload.fine)
+    local fine = tonumber(payload.fine) or 0
     local reportId = payload.reportId
 
     if not citizenId then
         return { success = false, message = 'Missing citizen ID' }
     end
-    if not fine or fine ~= fine or fine <= 0 then
+    if fine <= 0 then
         return { success = false, message = 'Invalid fine amount' }
     end
-    fine = math.floor(fine)
 
     local Player = ps.getPlayerByIdentifier(citizenId)
     if not Player then

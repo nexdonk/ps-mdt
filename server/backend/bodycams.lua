@@ -8,19 +8,22 @@ end
 
 local function shouldUseQbCore()
     local cfg = getBodycamConfig()
-    if cfg.DutyEventMode == 'pslib' then
+    -- Only use the QBCore duty path when explicitly in qbcore mode AND the
+    -- configured core resource is actually running. (`exports[x]` is always
+    -- truthy, so it cannot be used as a presence check.)
+    if cfg.DutyEventMode ~= 'qbcore' then
         return false
     end
-    return exports[cfg.DutyResource] ~= nil
+    return cfg.DutyResource ~= nil and GetResourceState(cfg.DutyResource) == 'started'
 end
 
 local function getQbCoreObject()
     local cfg = getBodycamConfig()
-    local resource = exports[cfg.DutyResource]
-    if not resource then
+    if not cfg.DutyResource or GetResourceState(cfg.DutyResource) ~= 'started' then
         return nil
     end
-    return resource:GetCoreObject()
+    local ok, core = pcall(function() return exports[cfg.DutyResource]:GetCoreObject() end)
+    return ok and core or nil
 end
 
 local function getOnDutyOfficers()
@@ -47,10 +50,23 @@ local function getOnDutyOfficers()
                 local jobName = ps.getJobName and ps.getJobName(playerId) or nil
                 local jobType = ps.getJobType and ps.getJobType(playerId) or nil
                 if IsPoliceJob(jobName, jobType) then
-                    local player = ps.getPlayer and ps.getPlayer(playerId) or nil
-                    if player then
-                        officers[#officers + 1] = player
-                    end
+                    officers[#officers + 1] = {
+                        PlayerData = {
+                            source = playerId,
+                            citizenid = ps.getIdentifier and ps.getIdentifier(playerId) or nil,
+                            charinfo = {
+                                firstname = (ps.getCharInfo and ps.getCharInfo(playerId, 'firstname')) or (ps.getPlayerName and ps.getPlayerName(playerId)) or 'Officer',
+                                lastname = (ps.getCharInfo and ps.getCharInfo(playerId, 'lastname')) or '',
+                            },
+                            metadata = { callsign = ps.getMetadata and ps.getMetadata(playerId, 'callsign') or nil },
+                            job = {
+                                name = jobName,
+                                type = jobType,
+                                onduty = true,
+                                grade = { name = ps.getJobGradeName and ps.getJobGradeName(playerId) or 'Officer' },
+                            },
+                        },
+                    }
                 end
             end
         end
@@ -114,19 +130,22 @@ ps.registerCallback(resourceName .. ':server:getBodycams', function(source)
         ps.debug('getBodycams: Verifying bodycam:', bodycamId, 'for player:', data.playerId)
         local isStillOnline = false
 
-        local player = nil
         if shouldUseQbCore() then
             local QBCore = getQbCoreObject()
-            if QBCore and QBCore.Functions and QBCore.Functions.GetPlayer then
-                player = QBCore.Functions.GetPlayer(data.playerId)
+            local player = QBCore and QBCore.Functions and QBCore.Functions.GetPlayer and QBCore.Functions.GetPlayer(data.playerId) or nil
+            if player and player.PlayerData and player.PlayerData.job and player.PlayerData.job.onduty then
+                isStillOnline = true
+                ps.debug('getBodycams: Officer verified as online:', data.officerName)
             end
-        elseif ps and ps.getPlayer then
-            player = ps.getPlayer(data.playerId)
-        end
-
-        if player and player.PlayerData and player.PlayerData.job and player.PlayerData.job.onduty then
-            isStillOnline = true
-            ps.debug('getBodycams: Officer verified as online:', data.officerName)
+        elseif ps and ps.getJobDuty then
+            if ps.getJobDuty(data.playerId) then
+                local jName = ps.getJobName and ps.getJobName(data.playerId) or nil
+                local jType = ps.getJobType and ps.getJobType(data.playerId) or nil
+                if IsPoliceJob(jName, jType) then
+                    isStillOnline = true
+                    ps.debug('getBodycams: Officer verified as online:', data.officerName)
+                end
+            end
         end
 
         ps.debug('getBodycams: Officer', data.officerName, 'isStillOnline:', isStillOnline)
@@ -195,8 +214,7 @@ ps.registerCallback(resourceName .. ':server:viewBodycam', function(source, body
         rotation = vector3(0.0, 0.0, heading),
         networkId = nil, -- No entity to hide for bodycams
         isBodycam = true,
-        targetSource = targetSource,
-        officerName = bodycamData.officerName
+        targetSource = targetSource
     })
 
     -- Track this viewer
@@ -335,8 +353,19 @@ local function handleDutyChange(playerId, job, onDuty, employeeData)
             end
         elseif ps and ps.getPlayer then
             local player = ps.getPlayer(playerId)
-            if player and player.PlayerData then
-                createOfficerBodycam(playerId, player.PlayerData)
+            if player then
+                createOfficerBodycam(playerId, {
+                    source = playerId,
+                    citizenid = ps.getIdentifier and ps.getIdentifier(playerId) or nil,
+                    charinfo = {
+                        firstname = (ps.getCharInfo and ps.getCharInfo(playerId, 'firstname')) or (ps.getPlayerName and ps.getPlayerName(playerId)) or 'Officer',
+                        lastname = (ps.getCharInfo and ps.getCharInfo(playerId, 'lastname')) or '',
+                    },
+                    metadata = { callsign = ps.getMetadata and ps.getMetadata(playerId, 'callsign') or nil },
+                    job = {
+                        grade = { name = ps.getJobGradeName and ps.getJobGradeName(playerId) or 'Officer' },
+                    },
+                })
                 return
             end
         end
@@ -386,13 +415,19 @@ CreateThread(function()
                         if Player and Player.PlayerData.job and Player.PlayerData.job.onduty then
                             createOfficerBodycam(Player.PlayerData.source, Player.PlayerData)
                         end
-                    elseif ps and ps.getPlayerByIdentifier then
-                        -- getEmployees() returns offline staff too; resolving an
-                        -- offline citizenid can throw inside the framework bridge
-                        -- (nil player index), so guard it.
-                        local okp, player = pcall(ps.getPlayerByIdentifier, officer.citizenid)
-                        if okp and player and player.PlayerData and player.PlayerData.job and player.PlayerData.job.onduty then
-                            createOfficerBodycam(player.PlayerData.source, player.PlayerData)
+                    elseif ps and ps.getSource then
+                        local src = ps.getSource(officer.citizenid)
+                        if src and ps.getJobDuty and ps.getJobDuty(src) then
+                            createOfficerBodycam(src, {
+                                source = src,
+                                citizenid = officer.citizenid,
+                                charinfo = {
+                                    firstname = (ps.getCharInfo and ps.getCharInfo(src, 'firstname')) or (ps.getPlayerName and ps.getPlayerName(src)) or 'Officer',
+                                    lastname = (ps.getCharInfo and ps.getCharInfo(src, 'lastname')) or '',
+                                },
+                                metadata = { callsign = ps.getMetadata and ps.getMetadata(src, 'callsign') or nil },
+                                job = { grade = { name = ps.getJobGradeName and ps.getJobGradeName(src) or 'Officer' } },
+                            })
                         end
                     end
                 end
