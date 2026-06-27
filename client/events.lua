@@ -8,18 +8,41 @@ local function isDojJob(jobName)
     return false
 end
 
+local function jobNameInList(jobName, list)
+    if not jobName or not list then return false end
+    for _, name in ipairs(list) do
+        if name == jobName then return true end
+    end
+    return false
+end
+
+-- Resolve on-duty state across frameworks: QBCore uses `onduty`, ESX uses
+-- `onDuty`; fall back to the bridge for whichever is current.
+local function jobOnDuty(job)
+    if job ~= nil then
+        if job.onduty ~= nil then return job.onduty end
+        if job.onDuty ~= nil then return job.onDuty end
+    end
+    if ps.getJobDuty then return ps.getJobDuty() end
+    return false
+end
+
 local function isAuthorizedJob(job)
     if not job then return false, nil end
-    if job.type == Config.PoliceJobType then return true, 'leo' end
-    if job.type == Config.MedicalJobType then return true, 'ems' end
-    if isDojJob(job.name) or (Config.DojJobType and job.type == Config.DojJobType) then return true, 'doj' end
+    local jobType, jobName = job.type, job.name
+    -- LEO: match by job type (QBCore/Qbox) OR by job name (ESX / name-based).
+    if jobType == Config.PoliceJobType or jobNameInList(jobName, Config.PoliceJobs) then return true, 'leo' end
+    -- EMS
+    if jobType == Config.MedicalJobType or jobNameInList(jobName, Config.MedicalJobs) then return true, 'ems' end
+    -- DOJ
+    if isDojJob(jobName) or (Config.DojJobType and jobType == Config.DojJobType) then return true, 'doj' end
     return false, nil
 end
 
 function NUIUpdateAuthWithData(jobData)
     local job = jobData or ps.getJob()
     local authorized, jobType = isAuthorizedJob(job)
-    local onDuty = job and job.onduty or false
+    local onDuty = jobOnDuty(job)
 
     SendNUI('updateAuth', {
         authorized = authorized and onDuty,

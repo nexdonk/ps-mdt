@@ -135,7 +135,6 @@ function OpenMDT()
 
     -- Check if MDT is already open
     if MDTOpen then
-        if StopMdtRadio then StopMdtRadio() end
         StopTabletAnimation()
         SendNUI('setVisible', { visible = false })
         SetNuiFocus(false, false)
@@ -147,10 +146,6 @@ function OpenMDT()
 
     MDTOpen = true
 
-    -- ── Critical path: get the UI on screen this frame ──────────────────────
-    -- Only visibility + auth + focus run synchronously so the panel appears
-    -- instantly. Everything cosmetic (sound, tablet prop/animation) or map-
-    -- related is pushed to later frames so opening never spikes one frame.
     SendNUI('setVisible', { visible = true, debugMode = Config.Debug })
 
     if isCivilian then
@@ -165,6 +160,8 @@ function OpenMDT()
             jobType = 'civilian',
         })
     else
+        PlayMDTSound('open')
+        PlayTabletAnimation()
         NUIUpdateAuth()
         TriggerServerEvent('ps-mdt:server:trackLogin')
     end
@@ -172,46 +169,16 @@ function OpenMDT()
     SetNuiFocus(true, true)
     SetNuiFocusKeepInput(false)
     toggleControls(true)
-
-    -- ── Deferred path: spread the heavy / non-critical work over later frames ─
-    CreateThread(function()
-        Wait(0)
-        if not MDTOpen then return end -- player toggled it back off already
-
-        if not isCivilian then
-            PlayMDTSound('open')
-            -- Tablet prop + animation (CreateObject / AttachEntity / TaskPlayAnim)
-            -- is the most expensive native cluster on open; it yields internally
-            -- so it lands on its own frame(s), not the UI frame.
-            PlayTabletAnimation()
-        end
-
-        Wait(0)
-        if not MDTOpen then return end
-
-        -- Map state is only needed once the Map tab is actually opened.
-        SendMapCitizenId()
-        SendMapUiState()
-
-        -- Tell the NUI which key to listen for so PTT works while the MDT is
-        -- focused (resolves the player's real radio keybind when possible).
-        if SendRadioConfig then SendRadioConfig() end
-    end)
 end
 
 -- Close MDT
 local closeControlsPending = false
 
-
-function CloseMDT(keepAnimation)
+function CloseMDT()
     if MDTOpen then
         MDTOpen = false
 
-        if StopMdtRadio then StopMdtRadio() end
-
-        if not keepAnimation then
-            StopTabletAnimation()
-        end
+        StopTabletAnimation()
 
         SendNUI('setVisible', { visible = false })
         SetNuiFocus(false, false)

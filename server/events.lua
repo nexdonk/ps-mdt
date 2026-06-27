@@ -2,7 +2,6 @@ local resourceName = tostring(GetCurrentResourceName())
 
 RegisterNetEvent(resourceName..':server:viewWarrant', function(warrantId)
     local src = source
-    if not CheckAuth(src) then return end
     local Player = ps.getPlayer(src)
 
     if not Player then return end
@@ -12,7 +11,6 @@ end)
 
 RegisterNetEvent(resourceName..':server:viewBolo', function(boloId)
     local src = source
-    if not CheckAuth(src) then return end
     local Player = ps.getPlayer(src)
 
     if not Player then return end
@@ -42,7 +40,6 @@ end)
 --- @param reportId number The ID of the report to view
 RegisterNetEvent(resourceName..':server:viewReport', function(reportId)
     local src = source
-    if not CheckAuth(src) then return end
     local Player = ps.getPlayer(src)
 
     -- Validate input
@@ -65,7 +62,6 @@ end)
 RegisterNetEvent("wk:onPlateScanned")
 AddEventHandler("wk:onPlateScanned", function(cam, plate, index)
     local src = source
-    if not CheckAuth(src) then return end
     local Player = ps.getPlayer(src)
     local driversLicense = ps.getMetadata(src, 'licences') and ps.getMetadata(src, 'licences').driver
 
