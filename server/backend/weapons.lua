@@ -82,6 +82,34 @@ local class = {
 }
 local okQB, QBCore = pcall(function() return exports['qb-core']:GetCoreObject() end)
 if not okQB then QBCore = nil end
+
+--- Resolve a human-friendly label for a weapon/item model across frameworks.
+--- QBCore/Qbox expose QBCore.Shared.(Weapons|Items); ESX delegates to the
+--- inventory (ox_inventory) which the ps_lib bridge surfaces via ps.getItemLabel.
+local function resolveWeaponLabel(model)
+    if not model or model == '' then return model end
+    local lower = string.lower(model)
+    if QBCore and QBCore.Shared then
+        if QBCore.Shared.Weapons then
+            local w = QBCore.Shared.Weapons[GetHashKey(model)] or QBCore.Shared.Weapons[GetHashKey(lower)]
+            if w and w.label then return w.label end
+        end
+        if QBCore.Shared.Items then
+            local it = QBCore.Shared.Items[lower] or QBCore.Shared.Items[model]
+            if it and it.label then return it.label end
+        end
+    end
+    if ps.getItemLabel then
+        -- ox_inventory keys weapons UPPERCASE (e.g. WEAPON_PISTOL) but most
+        -- other items lowercase, so try both casings before giving up.
+        for _, key in ipairs({ model, lower }) do
+            local ok, lbl = pcall(ps.getItemLabel, key)
+            if ok and lbl and lbl ~= key then return lbl end
+        end
+    end
+    return model
+end
+
 local function registerWeapon(citizenid, weaponName, serial, info)
     -- Ensure profile exists so owner name can be resolved later
     if citizenid and citizenid ~= '' then
@@ -113,36 +141,19 @@ exports('registerWeapon', registerWeapon)
 
 ps.registerCallback('ps-mdt:server:getWeapons', function(source)
     if not CheckAuth(source) then return {} end
-    local weapons = MySQL.query.await('SELECT * FROM mdt_weapons') or {}
+    local weapons = MySQL.query.await('SELECT * FROM mdt_weapons')
     local newData = {}
     local weaponBolo = {}
-
-    -- Batch-resolve owner names in a single query to avoid an N+1 lookup per weapon
-    local nameByOwner = {}
-    do
-        local owners, seen = {}, {}
-        for _, v in pairs(weapons) do
-            if v.owner and v.owner ~= '' and not seen[v.owner] then
-                seen[v.owner] = true
-                owners[#owners + 1] = v.owner
-            end
-        end
-        if #owners > 0 then
-            local placeholders = string.rep('?,', #owners - 1) .. '?'
-            local profiles = MySQL.query.await('SELECT citizenid, fullname FROM mdt_profiles WHERE citizenid IN (' .. placeholders .. ')', owners) or {}
-            for _, p in ipairs(profiles) do
-                if p.fullname and p.fullname ~= '' then
-                    nameByOwner[p.citizenid] = p.fullname
-                end
-            end
-        end
-    end
-
     for k, v in pairs(weapons) do
-        -- Resolve owner name: batched mdt_profiles lookup first, then ps_lib fallback
+        -- Resolve owner name: try mdt_profiles first, then ps_lib lookup
         local ownerName = 'Unknown'
         if v.owner and v.owner ~= '' then
-            ownerName = nameByOwner[v.owner] or ps.getPlayerNameByIdentifier(v.owner) or 'Unknown'
+            local profile = MySQL.single.await('SELECT fullname FROM mdt_profiles WHERE citizenid = ?', { v.owner })
+            if profile and profile.fullname and profile.fullname ~= '' then
+                ownerName = profile.fullname
+            else
+                ownerName = ps.getPlayerNameByIdentifier(v.owner) or 'Unknown'
+            end
         end
 
         -- Normalize weapon model to lowercase for class table lookup
@@ -155,10 +166,9 @@ ps.registerCallback('ps-mdt:server:getWeapons', function(source)
             information = v.information,
             weaponClass = v.weaponClass,
             weaponModel = v.weaponModel,
-            name = (QBCore and QBCore.Shared and QBCore.Shared.Weapons and QBCore.Shared.Weapons[GetHashKey(v.weaponModel)] and QBCore.Shared.Weapons[GetHashKey(v.weaponModel)].label) or v.weaponModel,
+            name = resolveWeaponLabel(v.weaponModel),
             image = 'https://docs.fivem.net/weapons/' .. v.weaponModel:upper() .. '.png',
             type = class[modelLower] and class[modelLower].type or 'unknown',
-            flags = v.flags and json.decode(v.flags) or {},
         }
         table.insert(newData, weaponInfo)
     end
@@ -178,54 +188,18 @@ ps.registerCallback('ps-mdt:server:getWeapons', function(source)
     return { weapons = newData, bolos = weaponBolo }
 end)
 
-ps.registerCallback(resourceName .. ':server:getWeaponOwnershipHistory', function(source, payload)
+ps.registerCallback(resourceName .. ':server:getWeaponOwnershipHistory', function(source, serial)
     local src = source
-    if not CheckAuth(src) then return {} end
-
-    local serial = payload
-
+    if not CheckAuth(src) then return end
     if not serial or serial == '' then return {} end
 
     local rows = MySQL.query.await([[
-        SELECT h.id, h.serial, h.owner, h.weapon_model, h.weapon_class, h.information, h.changed_by, h.reason, h.created_at,
-               p.fullname AS owner_name,
-               cb.fullname AS changed_by_name
-        FROM mdt_weapon_ownership_history h
-        LEFT JOIN mdt_profiles p ON p.citizenid = h.owner
-        LEFT JOIN mdt_profiles cb ON cb.citizenid = h.changed_by
-        WHERE h.serial = ?
-        ORDER BY h.created_at DESC
+        SELECT id, serial, owner, weapon_model, weapon_class, information, changed_by, reason, created_at
+        FROM mdt_weapon_ownership_history
+        WHERE serial = ?
+        ORDER BY created_at DESC
     ]], { serial })
-
     return rows or {}
-end)
-
-ps.registerCallback(resourceName .. ':server:getWeaponConfig', function(source)
-    return { weapons = Config.Weapons }
-end)
-
-ps.registerCallback(resourceName .. ':server:saveWeaponFlags', function(source, serial, flags)
-    local src = source
-    if not CheckAuth(src) then return { success = false } end
-    if not serial or serial == '' then return { success = false } end
-
-    local decoded
-    if type(flags) == 'table' then
-        decoded = flags
-    elseif type(flags) == 'string' then
-        decoded = json.decode(flags) or {}
-    else
-        decoded = {}
-    end
-
-    local encoded = json.encode(decoded)
-    local affected = MySQL.update.await('UPDATE mdt_weapons SET flags = ? WHERE serial = ?', { encoded, serial })
-
-    if affected and affected > 0 then
-        return { success = true }
-    else
-        return { success = false, message = 'Database error' }
-    end
 end)
 
 -- Save/Edit Weapon Info (from NUI)
@@ -245,11 +219,6 @@ ps.registerCallback(resourceName .. ':server:saveWeaponInfo', function(source, p
         return { success = false, message = 'Missing serial number' }
     end
 
-    -- Ensure profile exists before insert/update to avoid FK constraint error
-    -- if owner and owner ~= '' then
-    --     EnsureProfileExists(owner)
-    -- end
-
     local existing = MySQL.single.await('SELECT id FROM mdt_weapons WHERE serial = ? LIMIT 1', { serial })
 
     if existing then
@@ -258,11 +227,6 @@ ps.registerCallback(resourceName .. ':server:saveWeaponInfo', function(source, p
             SET information = ?, owner = ?, weaponClass = ?, weaponModel = ?
             WHERE serial = ?
         ]], { notes, owner, weapClass, weapModel, serial })
-
-        MySQL.insert.await([[
-            INSERT INTO mdt_weapon_ownership_history (serial, owner, weapon_model, weapon_class, information, changed_by, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ]], { serial, owner, weapModel, weapClass, notes, ps.getIdentifier(src), 'ownership_transfer' })
     else
         MySQL.insert.await([[
             INSERT INTO mdt_weapons (serial, scratched, owner, information, weaponClass, weaponModel)
@@ -317,9 +281,7 @@ end)
 -- Scan player inventory for weapons (for self-register)
 ps.registerCallback(resourceName .. ':server:getWeaponInfo', function(source)
     local src = source
-    if not QBCore then return {} end
-    local Player = QBCore.Functions.GetPlayer(src)
-    if not Player then return {} end
+    local ownerName = ps.getPlayerName(src) or 'Unknown'
 
     local weaponInfos = {}
 
@@ -333,8 +295,8 @@ ps.registerCallback(resourceName .. ':server:getWeaponInfo', function(source)
                     local invImage = ('https://cfx-nui-ox_inventory/web/images/%s.png'):format(item.name)
                     weaponInfos[#weaponInfos + 1] = {
                         serialnumber = item.metadata and item.metadata.serial or 'Unknown',
-                        owner = Player.PlayerData.charinfo.firstname .. ' ' .. Player.PlayerData.charinfo.lastname,
-                        weaponmodel = (QBCore.Shared.Items[string.lower(item.name)] and QBCore.Shared.Items[string.lower(item.name)].label) or item.name,
+                        owner = ownerName,
+                        weaponmodel = resolveWeaponLabel(item.name),
                         weaponurl = invImage,
                         notes = 'Self Registered',
                         weapClass = 1,
@@ -343,13 +305,15 @@ ps.registerCallback(resourceName .. ':server:getWeaponInfo', function(source)
             end
         end
     else
-        if Player.PlayerData.items then
+        -- Non-ox path: QBCore/Qbox style inventory stored on the player object.
+        local Player = QBCore and QBCore.Functions.GetPlayer(src)
+        if Player and Player.PlayerData and Player.PlayerData.items then
             for _, item in pairs(Player.PlayerData.items) do
                 if item.type == 'weapon' then
                     weaponInfos[#weaponInfos + 1] = {
                         serialnumber = item.info and item.info.serie or 'Unknown',
-                        owner = Player.PlayerData.charinfo.firstname .. ' ' .. Player.PlayerData.charinfo.lastname,
-                        weaponmodel = (QBCore.Shared.Items[item.name] and QBCore.Shared.Items[item.name].label) or item.name,
+                        owner = ownerName,
+                        weaponmodel = resolveWeaponLabel(item.name),
                         weaponurl = item.image or '',
                         notes = 'Self Registered',
                         weapClass = 1,
@@ -372,10 +336,7 @@ CreateThread(function()
     exports.ox_inventory:registerHook('buyItem', function(payload)
         if not payload.itemName or not string.find(payload.itemName, 'WEAPON_') then return true end
         CreateThread(function()
-            if not QBCore then return end
-            local Player = QBCore.Functions.GetPlayer(payload.source)
-            if not Player then return end
-            local owner = Player.PlayerData.citizenid
+            local owner = ps.getIdentifier(payload.source)
             if not owner or not payload.metadata or not payload.metadata.serial then return end
 
             local success, err = pcall(function()
@@ -394,10 +355,7 @@ CreateThread(function()
         exports.ox_inventory:registerHook('createItem', function(payload)
             if not payload.item or not payload.item.name or not string.find(payload.item.name, 'WEAPON_') then return true end
             CreateThread(function()
-                if not QBCore then return end
-                local Player = QBCore.Functions.GetPlayer(payload.inventoryId)
-                if not Player then return end
-                local owner = Player.PlayerData.citizenid
+                local owner = ps.getIdentifier(payload.inventoryId)
                 if not owner or not payload.metadata or not payload.metadata.serial then return end
 
                 local success, err = pcall(function()
@@ -479,10 +437,9 @@ do
     -- Clean up tracking when player drops
     AddEventHandler('playerDropped', function()
         local src = source
-        if not QBCore then return end
-        local Player = QBCore.Functions.GetPlayer(src)
-        if Player and Player.PlayerData and Player.PlayerData.citizenid then
-            knownSerials[Player.PlayerData.citizenid] = nil
+        local ok, owner = pcall(ps.getIdentifier, src)
+        if ok and owner then
+            knownSerials[owner] = nil
         end
     end)
 end
@@ -491,15 +448,10 @@ end
 RegisterNetEvent(resourceName .. ':server:selfRegisterWeapon')
 AddEventHandler(resourceName .. ':server:selfRegisterWeapon', function(serial, imageurl, notes, owner, weapClass, weapModel)
     local src = source
-    if not CheckAuth(src) then return end
     if not serial then return end
 
-    -- Derive owner server-side from player data instead of trusting client
-    local Player = QBCore and QBCore.Functions.GetPlayer(src)
-    local serverOwner = Player and Player.PlayerData.citizenid or ps.getIdentifier(src)
-
     local success, err = pcall(function()
-        exports[resourceName]:registerWeapon(serverOwner, weapModel or 'unknown', serial, notes or 'Self Registered')
+        exports[resourceName]:registerWeapon(owner or ps.getIdentifier(src), weapModel or 'unknown', serial, notes or 'Self Registered')
     end)
 
     if success then

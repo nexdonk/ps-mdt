@@ -4,9 +4,6 @@ local resourceName = tostring(GetCurrentResourceName())
 ps.registerCallback(resourceName .. ':server:impoundVehicle', function(source, payload)
     local src = source
     if not CheckAuth(src) then return { success = false, message = 'Unauthorized' } end
-    if not CheckPermission(src, 'vehicles_edit_dmv') then
-        return { success = false, message = 'Insufficient permissions' }
-    end
 
     payload = payload or {}
     local plate = payload.plate
@@ -56,9 +53,6 @@ end)
 ps.registerCallback(resourceName .. ':server:releaseImpound', function(source, payload)
     local src = source
     if not CheckAuth(src) then return { success = false, message = 'Unauthorized' } end
-    if not CheckPermission(src, 'vehicles_edit_dmv') then
-        return { success = false, message = 'Insufficient permissions' }
-    end
 
     payload = payload or {}
     local plate = payload.plate
