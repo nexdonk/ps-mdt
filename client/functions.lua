@@ -12,6 +12,12 @@ function GetRecentDispatch()
     return {}
 end
 
-AddEventHandler('QBCore:Client:OnPlayerLoaded', function()
-    local check = ps.callback('ps-mdt:hasProfile')
-end)
+local function bootstrapProfile()
+    -- Ensure an MDT profile exists for this character on (re)spawn.
+    pcall(function() ps.callback('ps-mdt:hasProfile') end)
+end
+
+-- QBCore / Qbox
+AddEventHandler('QBCore:Client:OnPlayerLoaded', bootstrapProfile)
+-- ESX
+AddEventHandler('esx:playerLoaded', bootstrapProfile)
