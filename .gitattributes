@@ -1,0 +1,27 @@
+# Normalize all text files to LF in the repository and on checkout (every OS).
+# Stops Windows/OneDrive from showing phantom CRLF<->LF "modifications".
+* text=auto eol=lf
+
+# Binary assets — never apply text or end-of-line conversion.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.bmp   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.eot   binary
+*.mp3   binary
+*.ogg   binary
+*.wav   binary
+*.zip   binary
+*.7z    binary
+*.ytyp  binary
+*.ydr   binary
+*.ybn   binary
+*.ydd   binary
+*.dds   binary
