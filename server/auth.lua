@@ -8,33 +8,40 @@ local function isDojJob(jobName)
     return false
 end
 
+-- Match a job NAME against a config list. ESX identifies jobs by name only
+-- ('police', 'ambulance', ...) with no native 'type' field, so name matching is
+-- the primary, framework-neutral way to authorize.
+local function jobNameInList(jobName, list)
+    if not jobName or not list then return false end
+    for _, name in ipairs(list) do
+        if name == jobName then return true end
+    end
+    return false
+end
+
+-- Resolve a player's MDT access by job NAME first (Config.PoliceJobs /
+-- MedicalJobs / DojJobs), falling back to job TYPE for QBCore/Qbox servers that
+-- use leo/ems/doj. Returns: authorized (boolean), mdtRole ('leo'|'ems'|'doj'|nil).
+function ResolveMdtAuth(source)
+    local jobName = ps.getJobName(source)
+    local jobType = ps.getJobType(source)
+    if jobNameInList(jobName, Config.PoliceJobs)  or jobType == Config.PoliceJobType  then return true, 'leo' end
+    if jobNameInList(jobName, Config.MedicalJobs) or jobType == Config.MedicalJobType then return true, 'ems' end
+    if isDojJob(jobName) or (Config.DojJobType and jobType == Config.DojJobType)       then return true, 'doj' end
+    return false, nil
+end
+
 function CheckAuth(source, silent)
-    -- Never feed an invalid/offline source into the framework bridge: some
-    -- bridges index the player object without a nil-check and raise a non-string
-    -- error ("attempt to index a nil value (local player)"). If that happens
-    -- inside a NUI callback it never replies, and the UI hangs until it times
-    -- out. Fail closed instead of crashing.
-    if not source or (tonumber(source) or 0) <= 0 then
-        return false
-    end
-
-    local ok, jobType, jobName = pcall(function()
-        return ps.getJobType(source), ps.getJobName(source)
-    end)
-    if not ok then
-        return false
-    end
-
     ps.debug('Checking MDT Authorization')
-    local dojCheck = isDojJob(jobName) or (Config.DojJobType and jobType == Config.DojJobType)
-    if jobType ~= Config.PoliceJobType and jobType ~= Config.MedicalJobType and not dojCheck then
-        ps.debug('Access Denied for ID: ' .. tostring(source) .. ', not an authorized job type')
+    local authorized, mdtRole = ResolveMdtAuth(source)
+    if not authorized then
+        ps.debug('Access Denied for ID: ' .. source .. ', Name: ' .. ps.getPlayerName(source) .. ', job not in any authorized list')
         if not silent then
             ps.notify(source, 'Access Denied: Authorized Personnel Only', 'error')
         end
         return false
     end
-    ps.debug('Access Granted for ID: ' .. tostring(source) .. ', job type: ' .. tostring(jobType))
+    ps.debug('Access Granted for ID: ' .. source .. ', Name: ' .. ps.getPlayerName(source) .. ', mdt role: ' .. tostring(mdtRole))
     return true
 end
 
