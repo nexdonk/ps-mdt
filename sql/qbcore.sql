@@ -740,6 +740,12 @@ CREATE TABLE IF NOT EXISTS `mdt_tags` (
   UNIQUE KEY `unique_tag_name_job` (`name`, `job_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
+-- Migration for existing installs: older mdt_tags had no job_type column, which
+-- breaks both the seed INSERTs below and the roster/management tag queries
+-- ("Unknown column 'job_type'"). Add it BEFORE those INSERTs run so a re-import
+-- self-heals (MariaDB supports ADD COLUMN IF NOT EXISTS).
+ALTER TABLE `mdt_tags` ADD COLUMN IF NOT EXISTS `job_type` VARCHAR(10) NOT NULL DEFAULT 'all';
+
 -- Default LEO Officer Tags
 INSERT IGNORE INTO mdt_tags (name, type, color, job_type) VALUES
 ('SWAT', 'officer', '#3b82f6', 'leo'),
@@ -1324,3 +1330,94 @@ CREATE TABLE IF NOT EXISTS `mdt_warrant_reviews` (
 
 -- Add lawyer_requested column to mdt_reports
 ALTER TABLE `mdt_reports` ADD COLUMN IF NOT EXISTS `lawyer_requested` tinyint(1) NOT NULL DEFAULT 0;
+
+-- ============================================================================
+--  Officer availability status (Map tab) — server/backend/officer_status.lua
+--  One row per officer, upserted by citizenid (INSERT ... ON DUPLICATE KEY).
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `mdt_officer_status` (
+  `citizenid` varchar(50) NOT NULL,
+  `status` varchar(50) NOT NULL,
+  `note` varchar(255) DEFAULT NULL,
+  `job_type` varchar(50) NOT NULL DEFAULT 'police',
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`citizenid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ============================================================================
+--  Bulletin board — server/backend/bulletinboard.lua
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `mdt_bulletin_categories` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `job` varchar(50) NOT NULL,
+  `value` varchar(48) NOT NULL,
+  `label` varchar(64) NOT NULL,
+  `icon` varchar(48) NOT NULL DEFAULT 'label',
+  `color` varchar(7) NOT NULL DEFAULT '#6B7280',
+  `sort_order` int(10) unsigned NOT NULL DEFAULT 0,
+  `is_default` tinyint(1) NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_job_value` (`job`, `value`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `mdt_bulletin_posts` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `job` varchar(50) NOT NULL,
+  `title` varchar(255) NOT NULL,
+  `content` text DEFAULT NULL,
+  `author` varchar(100) DEFAULT NULL,
+  `author_rank` varchar(100) DEFAULT NULL,
+  `category` varchar(50) DEFAULT NULL,
+  `priority` varchar(20) NOT NULL DEFAULT 'normal',
+  `pinned` tinyint(1) NOT NULL DEFAULT 0,
+  `created_by` varchar(50) DEFAULT NULL,
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_job` (`job`),
+  KEY `idx_job_category` (`job`, `category`),
+  KEY `idx_pinned` (`pinned`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- ============================================================================
+--  Court calendar — server/backend/court.lua
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS `mdt_court_hearings` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `title` varchar(255) NOT NULL,
+  `category` varchar(50) NOT NULL DEFAULT 'hearing',
+  `hearing_type` varchar(50) DEFAULT NULL,
+  `case_id` int(10) unsigned DEFAULT NULL,
+  `warrant_reportid` int(10) unsigned DEFAULT NULL,
+  `defendant_cid` varchar(50) DEFAULT NULL,
+  `defendant_name` varchar(100) DEFAULT NULL,
+  `scheduled_at` datetime NOT NULL,
+  `duration_minutes` int(10) unsigned NOT NULL DEFAULT 30,
+  `location` varchar(255) DEFAULT NULL,
+  `judge_cid` varchar(50) DEFAULT NULL,
+  `judge_name` varchar(100) DEFAULT NULL,
+  `status` varchar(30) NOT NULL DEFAULT 'scheduled',
+  `notes` text DEFAULT NULL,
+  `created_by` varchar(50) DEFAULT NULL,
+  `created_by_name` varchar(100) DEFAULT NULL,
+  `job_type` varchar(50) NOT NULL DEFAULT 'police',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_job_type_scheduled` (`job_type`, `scheduled_at`),
+  KEY `idx_case_id` (`case_id`),
+  CONSTRAINT `FK_mdt_court_hearings_cases` FOREIGN KEY (`case_id`) REFERENCES `mdt_cases` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+CREATE TABLE IF NOT EXISTS `mdt_court_attendees` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `hearing_id` int(10) unsigned NOT NULL,
+  `citizenid` varchar(50) NOT NULL,
+  `display_name` varchar(100) DEFAULT NULL,
+  `role` varchar(30) NOT NULL DEFAULT 'attendee',
+  `notified_at` timestamp NULL DEFAULT NULL,
+  `delivered_at` timestamp NULL DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_hearing_citizen` (`hearing_id`, `citizenid`),
+  KEY `idx_citizenid` (`citizenid`),
+  CONSTRAINT `FK_mdt_court_attendees_hearings` FOREIGN KEY (`hearing_id`) REFERENCES `mdt_court_hearings` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
