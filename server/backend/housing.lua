@@ -45,9 +45,76 @@ local function qq(name)
     return '`' .. name .. '`'
 end
 
+-- Resource names (used with GetResourceState / exports, never in SQL) may also
+-- contain hyphens (e.g. "qb-houses"), so they get a slightly looser check.
+local function validResource(name)
+    return type(name) == 'string' and name ~= '' and name:match('^[%w_%-]+$') ~= nil
+end
+
 local function disable(reason)
     print(('[ps-mdt] [housing] %s — the properties feature is disabled. Check Config.Housing.'):format(reason))
     return nil
+end
+
+-- Resolve which preset key to use. When Config.Housing.system is 'auto' (or
+-- nil) we scan Config.Housing.AutoDetect (a map of resourceName -> presetKey)
+-- and return the preset of the first resource that is currently 'started'.
+-- Any other value of `system` is treated as an explicit preset key.
+local function resolveSystem(cfg)
+    if cfg.system ~= nil and cfg.system ~= 'auto' then
+        return cfg.system
+    end
+    if type(cfg.AutoDetect) ~= 'table' then return nil end
+    for resource, presetKey in pairs(cfg.AutoDetect) do
+        if validResource(resource) and GetResourceState(resource) == 'started' then
+            return presetKey
+        end
+    end
+    return nil
+end
+
+-- Safely call an export function on a (started) resource. Returns nil on any
+-- failure so an export-based housing script can never throw a SCRIPT ERROR.
+local function callExport(resource, fn, ...)
+    if not validResource(resource) or not validIdent(fn) then return nil end
+    if GetResourceState(resource) ~= 'started' then return nil end
+    local exp = exports[resource]
+    if exp == nil then return nil end
+    local ok, res = pcall(exp[fn], exp, ...)
+    if not ok then
+        if ps and ps.warn then
+            ps.warn(('[housing] Export %s:%s failed: %s'):format(tostring(resource), tostring(fn), tostring(res)))
+        end
+        return nil
+    end
+    return res
+end
+
+-- Normalise one entry returned by an export listFn/getFn into the MDT's
+-- internal { id, property_name, coords, keyholders } shape. Handles both flat
+-- objects and bcs_housing-style nested Home objects (h.identifier,
+-- h.properties.name, h.properties.entry).
+local function mapExportEntry(entry)
+    if type(entry) ~= 'table' then return nil end
+
+    local id         = entry.id or entry.property_id or entry.propertyid or entry.identifier
+    local name       = entry.property_name or entry.name or entry.label or entry.street
+    local coords     = entry.coords or entry.entry or entry.entering or entry.door_data
+    local keyholders = entry.keyholders or entry.has_access
+
+    -- bcs_housing nests its label/coords under `properties`.
+    local props = entry.properties
+    if type(props) == 'table' then
+        name   = name   or props.name or props.label
+        coords = coords or props.entry or props.entering or props.coords
+    end
+
+    return {
+        id           = id,
+        property_name = name,
+        coords       = coords,
+        keyholders   = keyholders,
+    }
 end
 
 -- Resolve the active schema from Config.Housing once and cache the result.
@@ -62,9 +129,35 @@ local function getSchema()
     if type(cfg) ~= 'table' then return nil end   -- not configured -> silently off
     if cfg.enabled == false then return nil end   -- explicitly disabled -> silently off
 
-    local preset = cfg.Presets and cfg.Presets[cfg.system]
+    -- Pick the preset key (explicit Config.Housing.system, or auto-detect).
+    local systemKey = resolveSystem(cfg)
+    if systemKey == nil then
+        -- 'auto' resolved nothing (no supported housing resource started).
+        -- This is a valid state: the MDT just reports zero properties.
+        return nil
+    end
+
+    local preset = cfg.Presets and cfg.Presets[systemKey]
     if type(preset) ~= 'table' then
-        return disable(('Unknown housing system "%s"'):format(tostring(cfg.system)))
+        return disable(('Unknown housing system "%s"'):format(tostring(systemKey)))
+    end
+
+    -- EXPORT-based preset (scripts with no stable table — paid/encrypted).
+    -- Only function names are carried here; missing functions degrade to
+    -- empty/zero gracefully at call time.
+    if type(preset.export) == 'table' then
+        local e = preset.export
+        if not validResource(e.resource) then
+            return disable('The selected housing preset has a missing or invalid "export.resource"')
+        end
+        resolvedSchema = {
+            kind     = 'export',
+            resource = e.resource,
+            countFn  = validIdent(e.countFn) and e.countFn or nil,
+            listFn   = validIdent(e.listFn)  and e.listFn  or nil,
+            getFn    = validIdent(e.getFn)   and e.getFn   or nil,
+        }
+        return resolvedSchema
     end
 
     if not validIdent(preset.table) then
@@ -94,7 +187,7 @@ local function getSchema()
         end
     end
 
-    resolvedSchema = { table = preset.table, columns = cols, join = join }
+    resolvedSchema = { kind = 'table', table = preset.table, columns = cols, join = join }
     return resolvedSchema
 end
 
@@ -145,6 +238,22 @@ function Housing.GetCountsByOwners(citizenids)
         return counts
     end
 
+    -- EXPORT-based: count per owner using countFn, or #listFn when absent.
+    if schema.kind == 'export' then
+        if not schema.countFn and not schema.listFn then return counts end
+        for _, citizenid in ipairs(citizenids) do
+            local n = 0
+            if schema.countFn then
+                n = tonumber(callExport(schema.resource, schema.countFn, citizenid)) or 0
+            else
+                local list = callExport(schema.resource, schema.listFn, citizenid)
+                if type(list) == 'table' then n = #list end
+            end
+            if n > 0 then counts[citizenid] = n end
+        end
+        return counts
+    end
+
     local placeholders = {}
     for i = 1, #citizenids do placeholders[i] = '?' end
     local owner = qq(schema.columns.owner)
@@ -171,6 +280,20 @@ function Housing.GetByOwner(citizenid)
     local schema = getSchema()
     if not schema or not citizenid then return {} end
 
+    -- EXPORT-based: derive the list from listFn and normalise each entry.
+    if schema.kind == 'export' then
+        local out = {}
+        if not schema.listFn then return out end
+        local list = callExport(schema.resource, schema.listFn, citizenid)
+        if type(list) == 'table' then
+            for _, entry in ipairs(list) do
+                local mapped = mapExportEntry(entry)
+                if mapped then out[#out + 1] = mapped end
+            end
+        end
+        return out
+    end
+
     local sql = ('SELECT %s AS id, %s AS property_name, %s AS coords, %s AS keyholders FROM %s WHERE %s.%s = ?'):format(
         fieldExpr(schema, 'id', 't', 'j'),
         fieldExpr(schema, 'name', 't', 'j'),
@@ -190,6 +313,20 @@ end
 function Housing.GetById(propertyId)
     local schema = getSchema()
     if not schema or propertyId == nil then return nil end
+
+    -- EXPORT-based: only supported when the preset provides a getFn.
+    if schema.kind == 'export' then
+        if not schema.getFn then return nil end
+        local row = callExport(schema.resource, schema.getFn, propertyId)
+        local mapped = mapExportEntry(row)
+        if not mapped then return nil end
+        -- getFn results carry no owner field in our internal shape; expose
+        -- whatever the export provided (or nil) so the contract is honoured.
+        if type(row) == 'table' then
+            mapped.owner = row.owner or row.identifier or row.owner_citizenid
+        end
+        return mapped
+    end
 
     -- Without an id column we cannot look a property up individually.
     if not validIdent(schema.columns.id) then return nil end

@@ -90,6 +90,391 @@ Config.Dispatch = {
     FilterByJob = true,
 }
 
+-- ============================================================================
+--  Config.Housing — property/housing database integration for the MDT
+-- ============================================================================
+--  The MDT only ever calls Housing.GetCountsByOwners / GetByOwner / GetById
+--  (server/backend/housing.lua). Those helpers build their queries from the
+--  preset selected here, so no other file needs to know which housing script
+--  is running.
+--
+--  HOW TO PICK A SYSTEM:
+--    system = 'auto'  (default) -> the MDT scans AutoDetect below and uses the
+--                                  first preset whose resource is 'started'.
+--    system = 'qb-houses' (or any Presets key) -> force that exact preset and
+--                                  skip auto-detection.
+--    enabled = false  -> housing is silently disabled (no queries, no errors;
+--                        the MDT just reports zero properties everywhere).
+--
+--  PRESET SHAPES (see housing.lua):
+--    TABLE-based (preferred — works offline, no script dependency):
+--      { table, columns = { owner, id, name, coords, keyholders },
+--        join = { table, on = { left, right }, columns = { name, coords, ... } } }
+--      Any column you omit is treated as NULL. `join` is optional and only used
+--      by two-table systems (ownership row + a separate locations/catalog row).
+--    EXPORT-based (only when there is no stable table — paid/encrypted scripts):
+--      { export = { resource, countFn?, listFn?, getFn? } }
+--      Missing functions degrade to empty/zero gracefully.
+--
+--  SECURITY: every table/column name below is validated (^[%w_]+$) and
+--  backtick-quoted by housing.lua before it touches SQL. Owner values are
+--  always bound through ? placeholders. Keep names to letters/digits/underscore.
+Config.Housing = {
+    enabled = true,
+    system  = 'auto',
+
+    -- resource folder name -> preset key. Ordered so the most specific /
+    -- least-ambiguous schema wins when several happen to be present.
+    AutoDetect = {
+        ['ps-housing']             = 'ps-housing',
+        ['qbx_properties']         = 'qbx_properties',
+        ['qb-houses']              = 'qb-houses',
+        ['qs-housing']             = 'qs-housing',
+        ['origen_housing']         = 'origen_housing',
+        ['bcs_housing']            = 'bcs_housing',
+        ['loaf_housing']           = 'loaf_housing',
+        ['esx_property']           = 'esx_property',
+        ['esx_realestateagentjob'] = 'esx_realestateagentjob',
+        ['nory_houses']            = 'nory_houses',
+    },
+
+    Presets = {
+        -- qb-houses (QBCore). Ownership in player_houses; label/coords in
+        -- houselocations (join on player_houses.house = houselocations.name).
+        ['qb-houses'] = {
+            table   = 'player_houses',
+            columns = {
+                owner      = 'citizenid',  -- ESX forks populate `identifier` instead
+                id         = 'id',
+                name       = 'house',      -- internal key; label comes from the join
+                keyholders = 'keyholders', -- JSON array of identifiers
+            },
+            join = {
+                table   = 'houselocations',
+                on      = { left = 'house', right = 'name' },
+                columns = { name = 'label', coords = 'coords' }, -- coords is JSON text
+            },
+        },
+
+        -- ps-housing / ps-realtor (Project Sloth, QBCore/Qbox). Single table.
+        -- No label column (derive from street) and no flat coords (parse door_data JSON).
+        ['ps-housing'] = {
+            table   = 'properties',
+            columns = {
+                owner      = 'owner_citizenid',
+                id         = 'property_id',
+                name       = 'street',      -- combine with region client-side for full address
+                coords     = 'door_data',   -- JSON {x,y,z,h,length,width}
+                keyholders = 'has_access',  -- JSON array of citizenids
+            },
+        },
+
+        -- qbx_properties (Qbox). Single table; coords + keyholders are JSON.
+        ['qbx_properties'] = {
+            table   = 'properties',
+            columns = {
+                owner      = 'owner',
+                id         = 'id',
+                name       = 'property_name',
+                coords     = 'coords',      -- JSON {x,y,z[,w]}
+                keyholders = 'keyholders',  -- JSON object/array of citizenids
+            },
+        },
+
+        -- qs-housing (Quasar). Inherits the qb-houses schema (player_houses +
+        -- houselocations). VERIFY: encrypted source; on ESX builds the owner
+        -- column is `identifier`, not `citizenid` — switch owner below if needed.
+        ['qs-housing'] = {
+            table   = 'player_houses',
+            columns = {
+                owner      = 'citizenid',
+                id         = 'id',
+                name       = 'house',
+                keyholders = 'keyholders',
+            },
+            join = {
+                table   = 'houselocations',
+                on      = { left = 'house', right = 'name' },
+                columns = { name = 'label', coords = 'coords' },
+            },
+        },
+
+        -- esx_property (ESX). Ownership in owned_properties; label/coords in the
+        -- `properties` catalog (join on name). No keyholders concept in vanilla.
+        ['esx_property'] = {
+            table   = 'owned_properties',
+            columns = {
+                owner = 'owner',  -- ESX identifier
+                id    = 'id',
+                name  = 'name',   -- internal name; friendly label comes from the join
+            },
+            join = {
+                table   = 'properties',
+                on      = { left = 'name', right = 'name' },
+                columns = { name = 'label', coords = 'entering' }, -- entering is JSON {x,y,z,h}
+            },
+        },
+
+        -- esx_realestateagentjob (ESX). Data actually lives in esx_property's
+        -- owned_properties + properties tables (same schema as above).
+        ['esx_realestateagentjob'] = {
+            table   = 'owned_properties',
+            columns = {
+                owner = 'owner',  -- ESX identifier
+                id    = 'id',
+                name  = 'name',
+            },
+            join = {
+                table   = 'properties',
+                on      = { left = 'name', right = 'name' },
+                columns = { name = 'label', coords = 'entering' },
+            },
+        },
+
+        -- loaf_housing (loaf-scripts). Ownership only in loaf_properties.
+        -- VERIFY: label/coords live in loaf_housing's Lua config (not SQL) and
+        -- keyholders live in a separate resource (loaf_keysystem.loaf_keys),
+        -- so only id + counts are available from SQL. owner is the ESX
+        -- identifier (QBCore builds use citizenid).
+        ['loaf_housing'] = {
+            table   = 'loaf_properties',
+            columns = {
+                owner = 'owner',
+                id    = 'propertyid',
+            },
+        },
+
+        -- origen_housing (ESX/QBCore/Custom). VERIFY: framework SQL mirrors the
+        -- qb-houses layout (player_houses + houselocations); on ESX the owner
+        -- column is `identifier`. The script also exposes
+        -- exports.origen_housing:getOwnedHouses(id) if you prefer an export
+        -- preset instead of these tables.
+        ['origen_housing'] = {
+            table   = 'player_houses',
+            columns = {
+                owner      = 'citizenid',
+                id         = 'id',
+                name       = 'house',
+                keyholders = 'keyholders',
+            },
+            join = {
+                table   = 'houselocations',
+                on      = { left = 'house', right = 'name' },
+                columns = { name = 'label', coords = 'coords' },
+            },
+        },
+
+        -- nory_houses. VERIFY: no public source — table/column names are
+        -- best-guess conventions. Open the resource's .sql before relying on
+        -- this; owner may be citizenid (QB) or identifier (ESX).
+        ['nory_houses'] = {
+            table   = 'nory_houses',
+            columns = {
+                owner      = 'owner',
+                id         = 'id',
+                name       = 'label',
+                coords     = 'coords',
+                keyholders = 'keyholders',
+            },
+        },
+
+        -- bcs_housing (Bagus Code Studio) — PAID/encrypted, no stable table.
+        -- EXPORT-based: GetOwnedHomes returns an array of Home objects
+        -- (h.identifier, h.properties.name, h.properties.entry); keyholders are
+        -- fetched separately. VERIFY: GetOwnedHomes may expect a player SOURCE
+        -- rather than a citizenid/identifier — confirm against the install.
+        ['bcs_housing'] = {
+            export = {
+                resource = 'bcs_housing',
+                listFn   = 'GetOwnedHomes', -- (ownerOrSource) -> Home[]
+                -- countFn omitted -> module counts #list
+                -- getFn   omitted -> GetById returns nil for this system
+            },
+        },
+    },
+}
+
+-- ============================================================================
+--  Config.Phone — phone/number/email/SMS/mail integration for the MDT
+-- ============================================================================
+--  The MDT only ever calls the Phone helpers (server/backend/phone.lua):
+--    Phone.GetNumber / GetNumbersByOwners / GetEmail / SendSms / SendMail.
+--  Those build their behaviour from the preset selected here.
+--
+--  HOW TO PICK A SYSTEM:
+--    system = 'auto' (default) -> scans AutoDetect and uses the first preset
+--                                 whose resource is 'started'; if nothing
+--                                 matches it falls back to the 'default' preset
+--                                 (QBCore players.charinfo phone).
+--    system = 'lb-phone' (or any Presets key) -> force that exact preset.
+--    enabled = false -> phone integration silently off (numbers fall back to
+--                       whatever the SQL already provides; no errors).
+--
+--  PRESET FIELDS (see phone.lua):
+--    numberSource = 'charinfo' -> read players.charinfo JSON.
+--                                  fields: table (def 'players'),
+--                                  ownerColumn (def 'citizenid'),
+--                                  column (def 'charinfo'), path (def '$.phone').
+--                                  Batched with one JSON_EXTRACT IN(...) query.
+--    numberSource = 'table'    -> { table, ownerColumn, numberColumn }. IN(...).
+--    numberSource = 'esx'      -> read users.phone_number by identifier. IN(...).
+--    numberSource = 'export'   -> { export = { resource, getNumberFn } }; per-id.
+--    Optional sub-configs (each degrades to nil/false when absent or failing):
+--      email = { table, ownerColumn, emailColumn }          -- table lookup
+--           or { export = { resource, getEmailFn } }        -- getEmailFn(number)
+--      sms   = { export = { resource, sendFn } }            -- sendFn(from,to,body)
+--           or { event  = { name, args } }                  -- TriggerEvent(name, unpack(args))
+--      mail  = { export = { resource, sendFn } }            -- sendFn(citizenid, opts)
+--           or { event  = { name } }
+--
+--  SECURITY: table/column names are validated (^[%w_]+$) and backtick-quoted by
+--  phone.lua; owner/number values are always bound via ? placeholders.
+Config.Phone = {
+    enabled = true,
+    system  = 'auto',
+
+    -- resource folder name -> preset key. Most specific first.
+    AutoDetect = {
+        ['lb-phone']           = 'lb-phone',
+        ['qs-smartphone-pro']  = 'qs-smartphone',
+        ['qs-smartphone']      = 'qs-smartphone',
+        ['qs-smartphone-lite'] = 'qs-smartphone',
+        ['gksphone']           = 'gksphone',
+        ['yseries']            = 'yseries',
+        ['roadphone-pro']      = 'roadphone',
+        ['roadphone']          = 'roadphone',
+        ['high-phone']         = 'high-phone',
+        ['npwd']               = 'npwd',
+        ['okokphone']          = 'okokphone',
+        ['esx_phone']          = 'esx_phone',
+        ['qb-phone']           = 'qb-phone',
+    },
+
+    Presets = {
+        -- Default fallback: QBCore players.charinfo JSON ($.phone). Used when
+        -- 'auto' resolves nothing. Keep this even on ESX — it is harmless if the
+        -- column is missing (the query simply returns no rows).
+        ['default'] = {
+            numberSource = 'charinfo',
+            table        = 'players',
+            ownerColumn  = 'citizenid',
+            column       = 'charinfo',
+            path         = '$.phone',
+        },
+
+        -- qb-phone (QBCore). Number in players.charinfo. No email concept.
+        -- Mail via offline export; no clean single-SMS API (omitted).
+        ['qb-phone'] = {
+            numberSource = 'charinfo',
+            table        = 'players',
+            ownerColumn  = 'citizenid',
+            column       = 'charinfo',
+            path         = '$.phone',
+            mail = {
+                export = { resource = 'qb-phone', sendFn = 'sendNewMailToOffline' }, -- (citizenid, {sender,subject,message})
+            },
+        },
+
+        -- lb-phone (LB Scripts). Export-driven; works offline by identifier.
+        ['lb-phone'] = {
+            numberSource = 'export',
+            export = { resource = 'lb-phone', getNumberFn = 'GetEquippedPhoneNumber' }, -- (citizenid) -> number
+            email  = { export = { resource = 'lb-phone', getEmailFn = 'GetEmailAddress' } }, -- (number) -> email
+            sms    = { export = { resource = 'lb-phone', sendFn = 'SendMessage' } },      -- (from, to, body)
+            mail   = { export = { resource = 'lb-phone', sendFn = 'SendMail' } },         -- ({to,sender,subject,message})
+        },
+
+        -- npwd (Project Error). Number on the framework player table.
+        -- VERIFY: bridged installs may remap to players/citizenid; default ESX
+        -- config is users/identifier/phone_number.
+        ['npwd'] = {
+            numberSource = 'table',
+            table        = 'users',
+            ownerColumn  = 'identifier',
+            numberColumn = 'phone_number',
+            -- VERIFY: npwd's emitMessage takes a single OBJECT arg
+            -- ({senderNumber,targetNumber,message}), not positional (from,to,body).
+            sms = { export = { resource = 'npwd', sendFn = 'emitMessage' } },
+            -- no email / mail support in npwd
+        },
+
+        -- gksphone (gkshop). Export-driven; offline by owner key.
+        -- VERIFY: GetPhoneDataBySetupOwner returns a TABLE (read .phone_number),
+        -- not a plain number string.
+        ['gksphone'] = {
+            numberSource = 'export',
+            export = { resource = 'gksphone', getNumberFn = 'GetPhoneDataBySetupOwner' }, -- (ownerKey) -> {phone_number=...}
+            sms  = { export = { resource = 'gksphone', sendFn = 'SendMessage' } },         -- (fromNumber, toNumber, message)
+            mail = { export = { resource = 'gksphone', sendFn = 'SendNewMailOffline' } },  -- (ownerKey, {sender,subject,message,...})
+        },
+
+        -- yseries (TeamsGG YSeries / "yflip"). Export-driven.
+        -- VERIFY: identifier lookup only resolves the player's PRIMARY phone.
+        -- VERIFY: SendMail signature is (email, receiverType, receiver) — not the
+        -- (citizenid, opts) shape, so the mail export may need a custom adapter.
+        ['yseries'] = {
+            numberSource = 'export',
+            export = { resource = 'yseries', getNumberFn = 'GetPhoneNumberByIdentifier' }, -- (identifier) -> number
+            sms  = { export = { resource = 'yseries', sendFn = 'SendMessageTo' } },         -- (from, to, message, attachments)
+            mail = { export = { resource = 'yseries', sendFn = 'SendMail' } },              -- VERIFY arg shape
+        },
+
+        -- roadphone (RoadShop) — PAID/closed. Export-driven; offline by identifier.
+        ['roadphone'] = {
+            numberSource = 'export',
+            export = { resource = 'roadphone', getNumberFn = 'getNumberFromIdentifier' }, -- (identifier) -> number
+            -- VERIFY: sendMessage is documented as a CLIENT export; no server-only
+            -- SMS export. May need to resolve target source first.
+            sms  = { export = { resource = 'roadphone', sendFn = 'sendMessage' } },        -- (phoneNumber, message)
+            mail = { export = { resource = 'roadphone', sendFn = 'sendMailOffline' } },    -- (identifier, {sender,subject,message})
+        },
+
+        -- high-phone (High Scripts) — PAID/escrow.
+        -- VERIFY: getPlayerPhoneNumber takes a server SOURCE and is ONLINE-ONLY;
+        -- there is no documented offline-by-identifier number lookup, so offline
+        -- citizens will resolve to nil. Schema (hphone_*) columns are unknown.
+        ['high-phone'] = {
+            numberSource = 'export',
+            export = { resource = 'high-phone', getNumberFn = 'getPlayerPhoneNumber' }, -- VERIFY: (source) online only
+            email  = { export = { resource = 'high-phone', getEmailFn = 'getOfflinePlayerMailAccount' } }, -- VERIFY: (identifier) -> account
+            sms    = { export = { resource = 'high-phone', sendFn = 'sendMessage' } },  -- VERIFY: takes {sender,recipient,content}
+            mail   = { export = { resource = 'high-phone', sendFn = 'sendMail' } },     -- VERIFY: takes {sender,recipients,subject,content}
+        },
+
+        -- qs-smartphone (Quasar). Reads the framework player record.
+        -- ESX (this project): users.phone_number by identifier. On QBCore use the
+        -- 'default' charinfo preset instead. send APIs are PRO-only + online-only.
+        ['qs-smartphone'] = {
+            numberSource = 'esx',
+            -- VERIFY: send exports exist only on qs-smartphone-pro and target an
+            -- ONLINE player source, so offline delivery is not supported.
+            sms  = { export = { resource = 'qs-smartphone-pro', sendFn = 'sendNewMessageFromApp' } }, -- (source, number, msg, app)
+            mail = { export = { resource = 'qs-smartphone-pro', sendFn = 'sendNewMail' } },           -- (source, {sender,subject,message})
+            -- no email-address resolution in qs-smartphone
+        },
+
+        -- esx_phone (official ESX phone). Number in users.phone_number.
+        -- No email / mail. SMS via server event.
+        ['esx_phone'] = {
+            numberSource = 'esx',
+            -- TriggerEvent('esx_phone:send', toNumber, body[, anon, position]).
+            -- VERIFY: 'from' is derived from the calling source, not passed.
+            sms = { event = { name = 'esx_phone:send', args = { 'to', 'body' } } },
+        },
+
+        -- okokphone (okokScripts) — PAID, multi-framework.
+        -- VERIFY: NOTHING below is confirmed. No public docs/source expose the
+        -- export names, event names or SQL schema. Open the installed resource
+        -- (fxmanifest.lua + server/*.lua exports + sql/*.sql) and fill in
+        -- getNumberFn / sms / mail before relying on this preset. As shipped it
+        -- degrades to nil/false (no number, no send) rather than erroring.
+        ['okokphone'] = {
+            numberSource = 'export',
+            export = { resource = 'okokphone' }, -- VERIFY: getNumberFn unknown — left unset
+        },
+    },
+}
+
 -- Wolfknight Plate Reader Settings
 Config.UseWolfknightRadar = true -- Enable/disable Wolfknight radar integration
 Config.WolfknightNotifyTime = 5000 -- Duration (ms) for plate reader notifications

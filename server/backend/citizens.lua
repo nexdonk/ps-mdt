@@ -128,6 +128,7 @@ ps.registerCallback(resourceName .. ':server:getCitizens', function(source, page
     local propCounts = {}
     local vehCounts = {}
     local arrestCounts = {}
+    local phoneNumbers = {}
 
     if #citizenids > 0 then
         local inClause = buildInClause(citizenids)
@@ -142,13 +143,11 @@ ps.registerCallback(resourceName .. ':server:getCitizens', function(source, page
             end
         end
 
-        local propRows = safeQuery(
-            ('SELECT citizenid, COUNT(*) AS cnt FROM player_houses WHERE citizenid IN (%s) GROUP BY citizenid'):format(inClause),
-            citizenids
-        )
-        for _, row in ipairs(propRows) do
-            propCounts[row.citizenid] = tonumber(row.cnt) or 0
-        end
+        -- Property counts come from the Housing module (schema-agnostic; never errors)
+        propCounts = Housing.GetCountsByOwners(citizenids)
+
+        -- Correct phone numbers from the Phone module (overlaid below; charinfo stays fallback)
+        phoneNumbers = Phone.GetNumbersByOwners(citizenids)
 
         local vehRows = safeQuery(
             ('SELECT citizenid, COUNT(*) AS cnt FROM player_vehicles WHERE citizenid IN (%s) GROUP BY citizenid'):format(inClause),
@@ -174,7 +173,11 @@ ps.registerCallback(resourceName .. ':server:getCitizens', function(source, page
         v.lastName = v.lastname
         v.gender = getGender(tonumber(v.gender))
         v.dob = v.dateofbirth
-        v.phone = v.phone
+        -- Prefer the Phone module's number; fall back to charinfo's $.phone
+        local resolvedPhone = phoneNumbers[v.citizenid]
+        if resolvedPhone and resolvedPhone ~= '' then
+            v.phone = resolvedPhone
+        end
         v.image = profilePics[v.citizenid] or nil
         v.occupations = { v.job }
         v.properties = propCounts[v.citizenid] or 0
@@ -261,6 +264,7 @@ ps.registerCallback(resourceName .. ':server:searchCitizens', function(source, q
     local propCounts = {}
     local vehCounts = {}
     local arrestCounts = {}
+    local phoneNumbers = {}
 
     if #citizenids > 0 then
         local inClause = buildInClause(citizenids)
@@ -275,13 +279,11 @@ ps.registerCallback(resourceName .. ':server:searchCitizens', function(source, q
             end
         end
 
-        local propRows = safeQuery(
-            ('SELECT citizenid, COUNT(*) AS cnt FROM player_houses WHERE citizenid IN (%s) GROUP BY citizenid'):format(inClause),
-            citizenids
-        )
-        for _, row in ipairs(propRows) do
-            propCounts[row.citizenid] = tonumber(row.cnt) or 0
-        end
+        -- Property counts come from the Housing module (schema-agnostic; never errors)
+        propCounts = Housing.GetCountsByOwners(citizenids)
+
+        -- Correct phone numbers from the Phone module (overlaid below; charinfo stays fallback)
+        phoneNumbers = Phone.GetNumbersByOwners(citizenids)
 
         local vehRows = safeQuery(
             ('SELECT citizenid, COUNT(*) AS cnt FROM player_vehicles WHERE citizenid IN (%s) GROUP BY citizenid'):format(inClause),
@@ -307,7 +309,11 @@ ps.registerCallback(resourceName .. ':server:searchCitizens', function(source, q
         v.lastName = v.lastname
         v.gender = getGender(tonumber(v.gender))
         v.dob = v.dateofbirth
-        v.phone = v.phone
+        -- Prefer the Phone module's number; fall back to charinfo's $.phone
+        local resolvedPhone = phoneNumbers[v.citizenid]
+        if resolvedPhone and resolvedPhone ~= '' then
+            v.phone = resolvedPhone
+        end
         v.image = profilePics[v.citizenid] or nil
         v.occupations = { v.job }
         v.properties = propCounts[v.citizenid] or 0
@@ -420,7 +426,8 @@ ps.registerCallback(resourceName .. ':server:getCitizenProfile', function(source
     local flags = collectCitizenFlags({ citizenid })
     local vehicles = MySQL.query.await('SELECT plate, vehicle FROM player_vehicles WHERE citizenid = ?', { citizenid }) or {}
     local vehiclesCount = #vehicles
-    local properties = safeQuery('SELECT house FROM player_houses WHERE citizenid = ?', { citizenid })
+    -- Properties via the Housing module (schema-agnostic; returns {} when disabled/unsupported)
+    local properties = Housing.GetByOwner(citizenid)
     local propertiesCount = #properties
     local arrestsCount = MySQL.scalar.await('SELECT COUNT(*) FROM mdt_arrests WHERE citizenid = ?', { citizenid }) or 0
     local activeWarrants = MySQL.query.await([[

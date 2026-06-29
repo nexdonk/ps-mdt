@@ -116,26 +116,6 @@ local function courtCfg()
     return (Config and Config.Court) or {}
 end
 
--- Returns the configured phone resource name only if it is actually running.
-local function phoneResource()
-    local cfg = courtCfg().Phone
-    local res = cfg and cfg.Resource
-    if not res or res == '' then return nil end
-    if GetResourceState(res) ~= 'started' then return nil end
-    return res
-end
-
--- Resolve a player's equipped phone number from their citizenid (works offline).
-local function getPhoneNumberFor(citizenid)
-    local res = phoneResource()
-    if not res or not citizenid then return nil, res end
-    local ok, num = pcall(function()
-        return exports[res]:GetEquippedPhoneNumber(citizenid)
-    end)
-    if ok and num and tostring(num) ~= '' then return num, res end
-    return nil, res
-end
-
 -- Format a "YYYY-MM-DD HH:MM:SS" timestamp according to Config.DateTime.
 local function formatScheduled(scheduled_at)
     local s = tostring(scheduled_at or '')
@@ -160,36 +140,25 @@ local function formatScheduled(scheduled_at)
 end
 
 -- Send a reminder SMS from the configured court number to one attendee.
+-- Recipient resolution + delivery are handled by the Phone module.
 local function sendHearingSms(citizenid, body)
     local cfg = courtCfg()
     if not (cfg.Sms and cfg.Sms.enabled) then return false end
-    local to, res = getPhoneNumberFor(citizenid)
-    if not to then return false end
     local from = (cfg.Phone and cfg.Phone.SmsSenderNumber) or 'COURT'
-    local ok = pcall(function()
-        exports[res]:SendMessage(from, to, body)
-    end)
-    return ok and true or false
+    return Phone.SendSms(citizenid, from, body)
 end
 
--- Send an invite e-mail to one attendee (resolves their mail address via lb-phone).
+-- Send an invite e-mail to one attendee. The Phone module resolves the
+-- recipient's mail address and dispatches the mail for the active phone system.
 local function sendHearingMail(citizenid, subject, message)
     local cfg = courtCfg()
     if not (cfg.Email and cfg.Email.enabled) then return false end
-    local number, res = getPhoneNumberFor(citizenid)
-    if not number then return false end
-    local mok, email = pcall(function() return exports[res]:GetEmailAddress(number) end)
-    if not mok or not email or tostring(email) == '' then return false end
     local sender = (cfg.Phone and cfg.Phone.MailSender) or 'Court'
-    local sok = pcall(function()
-        exports[res]:SendMail({
-            to = email,
-            sender = sender,
-            subject = subject,
-            message = message,
-        })
-    end)
-    return sok and true or false
+    return Phone.SendMail(citizenid, {
+        subject = subject,
+        message = message,
+        sender  = sender,
+    })
 end
 
 -- Body for the lead-time reminder SMS.
@@ -839,7 +808,8 @@ end
 local function runReminders()
     local cfg = courtCfg()
     if not (cfg.Sms and cfg.Sms.enabled) then return end
-    if not phoneResource() then return end
+    -- Delivery is handled by the Phone module (auto-detects the active phone and
+    -- degrades to false if none/unsupported), so no legacy resource gate here.
 
     local lead = tonumber(cfg.ReminderLeadMinutes) or 15
     local ok, due = pcall(MySQL.query.await, [[
